@@ -12,7 +12,7 @@
 
 <div class="school-list">
     <?php
-    // Baca file JSON
+    // Baca dan parse file JSON sekali saja
     $json_file = 'data_sekolah.json';
     $json_data = file_get_contents($json_file);
     if ($json_data === false) {
@@ -23,45 +23,45 @@
         die("Error: Format JSON tidak valid di $json_file. " . json_last_error_msg());
     }
 
-    // Kelompokkan data berdasarkan sekolah (untuk menampilkan daftar pendamping)
+    // Kelompokkan data berdasarkan sekolah secara lebih efisien
     $grouped_data = [];
     foreach ($data as $item) {
         $school_name = $item['sekolah'];
         if (!isset($grouped_data[$school_name])) {
             $grouped_data[$school_name] = [
-                'pdf_file' => $item['pdf_file'], // Ambil PDF file dari entri pertama
+                'pdf_file' => $item['pdf_file'],
                 'pendamping_list' => []
             ];
         }
-        // Gabungkan semua pendamping dan kode verifikasi untuk sekolah ini
-        foreach ($item['pendamping'] as $idx => $pendamping_nama) {
-             $grouped_data[$school_name]['pendamping_list'][] = [
-                 'name' => $pendamping_nama,
-                 'code' => $item['verification_codes'][$idx] // Ambil kode verifikasi yang sesuai
-             ];
+        // Gabungkan semua pendamping dengan kode verifikasi
+        $pendamping_count = count($item['pendamping']);
+        for ($i = 0; $i < $pendamping_count; $i++) {
+            $grouped_data[$school_name]['pendamping_list'][] = [
+                'name' => $item['pendamping'][$i],
+                'code' => $item['verification_codes'][$i]
+            ];
         }
     }
 
-    // Urutkan daftar sekolah
+    // Urutkan daftar sekolah sekali saja
     ksort($grouped_data);
 
+    // Generate HTML output
     foreach ($grouped_data as $school_name => $school_info) {
-        $sekolah_nama = htmlspecialchars($school_name);
-        $pdf_file = $school_info['pdf_file'];
-        $pendamping_list = $school_info['pendamping_list'];
-
+        $sekolah_nama = htmlspecialchars($school_name, ENT_QUOTES, 'UTF-8');
+        $pdf_file = htmlspecialchars($school_info['pdf_file'], ENT_QUOTES, 'UTF-8');
+        
         echo "<div class='school-item'>";
         echo "<h3>$sekolah_nama</h3>";
         echo "<ul class='pendamping-list'>";
 
-        foreach ($pendamping_list as $pendamping) {
-            $pendamping_nama = htmlspecialchars($pendamping['name']);
-            $verification_code = $pendamping['code']; // Kode untuk verifikasi
+        foreach ($school_info['pendamping_list'] as $pendamping) {
+            $pendamping_nama = htmlspecialchars($pendamping['name'], ENT_QUOTES, 'UTF-8');
+            $verification_code = htmlspecialchars($pendamping['code'], ENT_QUOTES, 'UTF-8');
 
-            // Gunakan kode verifikasi sebagai identifier untuk tombol
             echo "<li>";
             echo "<strong>Pendamping:</strong> $pendamping_nama ";
-            echo "<button class='download-btn' onclick='openModal(\"$pdf_file\", \"$verification_code\", \"$pendamping_nama\")'>Download PDF</button>";
+            echo "<button class='download-btn' data-pdf='$pdf_file' data-code='$verification_code' data-name='$pendamping_nama'>Download PDF</button>";
             echo "</li>";
         }
 
@@ -90,88 +90,128 @@
 </div>
 
 <script>
+    // Cache DOM elements untuk performa lebih baik
     const modal = document.getElementById("myModal");
+    const pdfFileInput = document.getElementById("pdfFileInput");
+    const expectedCodeInput = document.getElementById("expectedCodeInput");
+    const modalPendampingName = document.getElementById("modal-pendamping-name");
+    const verificationCodeInput = document.getElementById("verificationCode");
+    const errorMessageDiv = document.getElementById("errorMessage");
+    const verificationForm = document.getElementById("verificationForm");
+
+    // Rate limiting untuk mencegah spam attempts
+    let lastAttemptTime = 0;
+    const ATTEMPT_DELAY = 1000; // 1 detik antara attempts
 
     function openModal(pdfFile, expectedCode, pendampingName) {
-        document.getElementById("pdfFileInput").value = pdfFile;
-        document.getElementById("expectedCodeInput").value = expectedCode; // Simpan kode yang benar
-        document.getElementById("modal-pendamping-name").textContent = "Pendamping: " + pendampingName;
-        document.getElementById("verificationCode").value = ""; // Kosongkan input user
-        document.getElementById("errorMessage").textContent = ""; // Kosongkan error
+        pdfFileInput.value = pdfFile;
+        expectedCodeInput.value = expectedCode;
+        modalPendampingName.textContent = "Pendamping: " + pendampingName;
+        verificationCodeInput.value = "";
+        errorMessageDiv.textContent = "";
         modal.style.display = "block";
+        // Focus pada input untuk UX yang lebih baik
+        verificationCodeInput.focus();
     }
 
     function closeModal() {
         modal.style.display = "none";
     }
 
-    // When the user clicks anywhere outside of the modal, close it
-    window.onclick = function(event) {
-        if (event.target == modal) {
+    // Gunakan event delegation untuk tombol download
+    document.querySelector('.school-list').addEventListener('click', function(event) {
+        if (event.target.classList.contains('download-btn')) {
+            const btn = event.target;
+            openModal(btn.dataset.pdf, btn.dataset.code, btn.dataset.name);
+        }
+    });
+
+    // Tutup modal saat klik di luar
+    window.addEventListener('click', function(event) {
+        if (event.target === modal) {
             closeModal();
         }
-    }
+    });
 
-    // Handle form submission (Client-Side Verification) - Updated for forced download
-    document.getElementById("verificationForm").addEventListener("submit", function(event) {
-        event.preventDefault(); // Prevent default form submission
+    // Handle form submission dengan optimasi
+    verificationForm.addEventListener("submit", function(event) {
+        event.preventDefault();
 
-        const input_code = document.getElementById("verificationCode").value.trim();
-        const expected_code = document.getElementById("expectedCodeInput").value; // Ambil kode yang benar
-        const errorMessageDiv = document.getElementById("errorMessage");
-        const pdfFileToDownload = document.getElementById("pdfFileInput").value;
+        // Rate limiting check
+        const currentTime = Date.now();
+        if (currentTime - lastAttemptTime < ATTEMPT_DELAY) {
+            errorMessageDiv.textContent = "Mohon tunggu sebentar sebelum mencoba lagi.";
+            return;
+        }
+        lastAttemptTime = currentTime;
+
+        const inputCode = verificationCodeInput.value.trim();
+        const expectedCode = expectedCodeInput.value;
+        const pdfFileToDownload = pdfFileInput.value;
 
         // Clear previous error
         errorMessageDiv.textContent = "";
 
-        if (input_code.length !== 4 || isNaN(input_code)) {
+        // Validasi input
+        if (inputCode.length !== 4) {
             errorMessageDiv.textContent = "Kode harus berupa 4 digit angka.";
+            verificationCodeInput.focus();
             return;
         }
 
-        if (input_code !== expected_code) {
+        if (!/^\d+$/.test(inputCode)) {
+            errorMessageDiv.textContent = "Kode harus berupa angka.";
+            verificationCodeInput.focus();
+            return;
+        }
+
+        if (inputCode !== expectedCode) {
             errorMessageDiv.textContent = "Kode verifikasi salah.";
+            verificationCodeInput.value = "";
+            verificationCodeInput.focus();
             return;
         }
 
-        // Jika kode benar, coba unduh file
-        // Membuat URL absolut untuk file PDF
-        const pdfUrl = `pdf_files/${encodeURIComponent(pdfFileToDownload)}`; // encodeURIComponent untuk keamanan nama file
+        // Download file
+        const pdfUrl = `pdf_files/${encodeURIComponent(pdfFileToDownload)}`;
 
-        // Coba trigger download menggunakan fetch dan Blob
-        // Ini lebih andal untuk memaksa download dibanding window.location.href
         fetch(pdfUrl)
             .then(response => {
                 if (!response.ok) {
-                    throw new Error(`Gagal mengambil file: ${response.status} ${response.statusText}`);
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                 }
-                return response.blob(); // Ambil file sebagai Blob
+                return response.blob();
             })
             .then(blob => {
-                // Buat URL objek untuk Blob
-                const blobUrl = window.URL.createObjectURL(blob);
-
-                // Buat link sementara untuk Blob
+                const blobUrl = URL.createObjectURL(blob);
                 const downloadLink = document.createElement('a');
                 downloadLink.href = blobUrl;
-                downloadLink.download = pdfFileToDownload; // Nama file saat diunduh
-
-                // Simulasikan klik pada link download
+                downloadLink.download = pdfFileToDownload;
+                
                 document.body.appendChild(downloadLink);
                 downloadLink.click();
-
-                // Hapus link sementara dan bebaskan URL objek
                 document.body.removeChild(downloadLink);
-                window.URL.revokeObjectURL(blobUrl);
-
-                // Tutup modal setelah download dimulai
+                
+                // Cleanup
+                setTimeout(() => URL.revokeObjectURL(blobUrl), 100);
                 closeModal();
             })
             .catch(error => {
                 console.error('Error saat mengunduh file:', error);
                 errorMessageDiv.textContent = 'Gagal mengunduh file. Silakan coba lagi nanti.';
             });
+    });
 
+    // Validasi input saat mengetik (hanya angka, max 4 digit)
+    verificationCodeInput.addEventListener('input', function(e) {
+        this.value = this.value.replace(/\D/g, '').slice(0, 4);
+    });
+
+    // Tutup modal dengan tombol Escape
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && modal.style.display === 'block') {
+            closeModal();
+        }
     });
 </script>
 
